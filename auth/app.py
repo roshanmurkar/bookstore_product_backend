@@ -3,9 +3,9 @@ from flask_mail import *
 from random import *
 import json
 
-app = Flask(__name__)
 
-otp = randint(00000,99999)
+
+app = Flask(__name__)
 
 with open('config.json','r') as f:
     params = json.load(f)['host_mail']
@@ -21,3 +21,4 @@ app.config['MAIL_USE_TLS'] = False
 app.config['MAIL_USE_SSL'] = True
 
 mail = Mail(app)
+# log.setLevel(logging.DEBUG)
