@@ -1,211 +1,301 @@
 import datetime
 import json
+from builtins import print
+import pandas as pd
 import jwt
 import re
 import pyotp
 from flask import jsonify, request
+from flask.typing import ResponseReturnValue
 from flask_mail import *
 from auth.exceptions import *
-from auth.app import app, mail
-from auth.models import db, InfoModel, InfoModelSchema,BookProduct,BookProductSchema,Orders,OrdersSchema,CartsSchema,Carts
+from auth.app import app, mail,log
+from auth.models import *
 import logging
 from io import TextIOWrapper
+from tabulate import tabulate
+import csv
+from utility import *
+from flask.views import MethodView
 
-logging.basicConfig(filename="bookstore_otp.log", filemode="w",datefmt='%Y-%m-%d,%H:%M:%S:%f')
-log = logging.getLogger()
+
 
 # registration= Blueprint("registration",__name__)
-with open('config.json','r') as f:
+with open('config.json', 'r') as f:
     params = json.load(f)['host_mail']
 
+book_coordinates = BookCoordinates()
+token_operation = TokenOperation()
+verification_coordinate= VerificationCoordinate()
+book_operation = BookOperation()
 
-@app.route('/registration',methods=['POST'])
-def register():
-    """
-    This function will take all require fields for user registration
-    :return: Status of User Registration
-    """
-    user_data = request.get_json()
-    username = user_data['username']
-    firstname = user_data['firstname']
-    lastname = user_data['lastname']
-    contactnumber = user_data['contactnumber']
-    password = user_data['password']
-    emailaddress = user_data['emailaddress']
 
-    try:
-        special_symbol = re.compile('[@_!#$%^&*()<>?/\|}{~:]')
-        email_pattern = re.compile('[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$')
-        if len(username) == 0 or len(firstname) == 0 or len(lastname) == 0 or \
-                len(contactnumber) == 0 or len(password) == 0 or len(emailaddress) == 0:
-            raise EmptyData
-        elif not contactnumber.isnumeric():
-            raise InvalidNumericData
-        elif firstname.isdigit() or lastname.isdigit():
-            raise InvalidStringData
-        elif not special_symbol.search(firstname) is None or not special_symbol.search(lastname) is None:
-            raise SpecialCharacterError
-        elif email_pattern.search(emailaddress) is None:
-            raise InvalidEmailAddress
-        user = InfoModel.query.filter_by(username=user_data['username']).first()
-        if user is None:
-            new_user = InfoModel(username, firstname, lastname, contactnumber, password, emailaddress)
-            db.session.add(new_user)
+
+class UserRegistration(MethodView):
+    def post(self):
+        try:
+            user_data = request.get_json()
+            validation = user_validation(user_data)
+            if validation is not True:
+                print(validation.get_json())
+                return jsonify(validation.get_json())
+            check_username = check_user(user_data['user_name'])
+            if check_username is False:
+                # new_registration = new_user_registration(user_data)
+                new_user_registration(user_data)
+                return jsonify({"message": "New User registration successful", "data": user_data})
+        except Exception as e:
+            log.exception(e.__str__())
+            return jsonify({"message": "Something is wrong"})
+
+
+
+class Verify(MethodView):
+    def post(self):
+        """
+            This function will take user email as a input for email verification
+            and after that it will send OTP to that email address for validation purpose
+            :return: It will send message and Email of user
+            """
+        try:
+            email = request.get_json()
+            if len(email['email']) == 0:
+                raise EmptyData
+            email_status_check = check_mail_status(email)
+            if email_status_check is True:
+                return jsonify({"message": "This User mail is already verified", "Data": email})
+            verification_coordinate.mail_for_verification(email_status_check)
+            if True:
+                return jsonify({"message": "OTP is send on given mail address", "data": email})
+        except EmptyData:
+            return jsonify({"message": "Empty data is not allowed", "Data": email})
+        except Exception as e:
+            log.exception(e.__str__())
+            return jsonify({"message": "Something is wrong"})
+
+
+
+class Validate(MethodView):
+    def post(self):
+        """
+            This function will take user email and verification OTP as a input
+            and then it will match user OTP and system OTP if the match is found
+            then it will return verified email address with user id token
+            :return: whether the email is verified por not if the email is verified
+                    then it send user token also.
+            """
+        try:
+            user_data = request.get_json()
+            if len(user_data['otp']) != 6:
+                raise InvalidSize
+            elif not user_data['otp'].isnumeric():
+                raise InvalidNumericData
+            user = verification_coordinate.validate_mail(user_data['email'],user_data['otp'])
+            if user is False:
+                return jsonify({"message": "Due to Invalid Email or OTP , Email verification is unsuccessful"})
+            create_token = token_operation.encode_token(user.user_id)
+            return jsonify({"message": "Email verification successfully", "token": create_token})
+        except InvalidSize:
+            return jsonify({"message": "OTP size is Invalid", "Data": user_data})
+        except InvalidNumericData:
+            return jsonify({"message": "OTP should be in numeric", "Data": user_data})
+        except Exception as e:
+            log.exception(e.__str__())
+            return jsonify({"message": "Something is Wrong"})
+
+
+
+class UserLogin(MethodView):
+    def post(self):
+        """
+            This function will take username and password as a input from user
+            and it will compare with database all entries
+            if the match is found then it will return login successful or unsuccessful
+            :return: message of login successful or unsuccessful with user data
+            """
+        try:
+            user_data = request.get_json()
+            if len(user_data['user_name']) == 0 or len(user_data['password']) == 0:
+                raise EmptyData
+            user = InfoModel.query.filter_by(user_name=user_data['user_name'], password=user_data['password']).first()
+            if user.is_verified == 'YES':
+                if user.password == str(user_data['password']):
+                    encoded_jwt = jwt.encode({"user_id": user.user_id}, "secret", algorithm="HS256")
+                    return jsonify(
+                        {"message": f"User Login Successful... Welcome {user.user_name}", "token": encoded_jwt})
+            else:
+                return jsonify({"message": "User Email is Not Verified", "Data": user.email_address})
+        except EmptyData:
+            return jsonify({"message": "Empty data is not allowed", "Data": user_data})
+        except Exception as e:
+            return jsonify({"message": str(e)})
+
+
+
+class AddBook(MethodView):
+    def post(self):
+        """
+            In this function we are adding particular book in our database
+            :return: status of book is added or not
+        """
+        try:
+            request_data = request.get_json()
+            if request_data['author_name'].isnumeric or request_data['title'].isnumeric:
+                raise InvalidStringData
+            book = BookProduct.query.filter_by(author=request_data['author_name'], title=request_data['title']).first()
+            if book is not None:
+                book.quantity = int(book.quantity) + int(request_data['quantity'])
+                db.session.commit()
+                return jsonify({"message": "Book Quantity is updated"})
+            # new_book = add_book(request_data)
+            book_operation.add_book(request_data)
+            return jsonify({"message": "New book is added."})
+        except InvalidStringData:
+            log.exception("Invalid String data")
+            return jsonify({"message": "Invalid Data"})
+        except Exception as e:
+            log.exception(e.__str__())
+            return jsonify({"message": "Something is wrong"})
+
+
+
+class Books(MethodView):
+    def get(self):
+        """
+            this function for displaying all books
+            :return:
+        """
+        try:
+            all_books = book_operation.get_all_books()
+            return jsonify({"message": "All Books Details", "details": all_books})
+        except Exception as e:
+            log.exception(e.__str__())
+            return jsonify({"message": "Something is wrong"})
+
+
+
+class SingleCart(MethodView):
+    def get(self):
+        """
+            this function to see particular card details by passing its cart_id
+            :return: particular cart details
+            """
+        try:
+            request_data = request.get_json()
+            if not request_data['cart_id'].isnumeric:
+                raise InvalidNumericData
+            cart_data = check_cart_items(request_data['cart_id'])
+            if len(cart_data) == 0:
+                return jsonify({"message": "Cart is not found"})
+            cart_details = get_particular_cart_details(cart_data)
+            return jsonify({"message": "successful", "data": cart_details})
+        except InvalidNumericData:
+            log.exception("Cart_id should be numeric data")
+            return jsonify({"message": "Cart_id should be numeric data"})
+        except Exception as e:
+            log.exception(e.__str__())
+            return jsonify({"message": "Something is wrong"})
+
+
+
+class BuyBook(MethodView):
+    def post(self):
+        """
+            this function for buying particular cart using cart_id
+            :return: email and response
+        """
+        try:
+            auth = request.headers.get('authorization')
+            user = token_operation.decode_token(auth)
+            if user is None:
+                raise InvalidToken
+            request_data = request.get_json()
+            cart_check = check_cart(request_data['cart_id'])
+            if cart_check is None:
+                return jsonify({"message": "Cart is not found"})
+            generate_new_order(cart_check.user_id)
+            cart_check.status = 'Ordered'
             db.session.commit()
-            return jsonify({"message": "New User registration successful", "data": user_data})
-        else:
-            return jsonify({"message": "UserName is already Registered","Data":user_data})
-    except EmptyData:
-        return jsonify({"message": "Empty data is not allowed","Data":user_data})
-    except InvalidNumericData:
-        return jsonify({"message": "Contact number should be in numeric","Data":contactnumber})
-    except InvalidStringData:
-        return jsonify({"message":"FirstName and LastName should be in String","Data":user_data})
-    except SpecialCharacterError:
-        return jsonify({"message":"Don't use Special letters in FirstName and LastName","Data":user_data})
-    except InvalidEmailAddress:
-        return jsonify({"message":"Invalid Email address","Data":emailaddress})
-    except Exception as e:
-        return jsonify({"message":str(e)})
-
-# details= Blueprint("details",__name__)
-
-@app.route('/details',methods=['GET'])
-def details():
-    info_model = InfoModel.query.all()
-    info_model_schema = InfoModelSchema(many=True)
-    output = info_model_schema.dump(info_model)
-    return jsonify({"message":"All User Registrations","details": output})
-
-
-# login= Blueprint("login",__name__)
-
-@app.route('/login',methods=['POST'])
-def login():
-    """
-    This function will take username and password as a input from user
-    and it will compare with database all entries
-    if the match is found then it will return login successful or unsuccessful
-    :return: message of login successful or unsuccessful with user data
-    """
-    user_data = request.get_json()
-    try:
-        if len(user_data['username']) == 0 or len(user_data['password']) == 0:
-            raise EmptyData
-        user = InfoModel.query.filter_by(username=user_data['username'],password=user_data['password']).first()
-        if user.is_verified == 'YES':
-            if user.password == str(user_data['password']):
-                encoded_jwt = jwt.encode({"uid": user.uid}, "secret", algorithm="HS256")
-                return jsonify({"message": f"User Login Successful... Welcome {user.username}", "token": encoded_jwt})
-        else:
-            return jsonify({"message":"User Email is Not Verified","Data":user.emailaddress})
-    except EmptyData:
-        return jsonify({"message": "Empty data is not allowed","Data":user_data})
-    except Exception as e:
-        return jsonify({"message":str(e)})
-
-@app.route('/verify',methods=['POST','GET'])
-def verify():
-    """
-    This function will take user email as a input for email verification
-    and after that it will send OTP to that email address for validation purpose
-    :return: It will send message and Email of user
-    """
-    email = request.get_json()
-    try:
-        if len(email['email']) == 0:
-            raise EmptyData
-        user = InfoModel.query.filter_by(emailaddress=email['email']).first()
-        if user.is_verified == 'YES':
-            return jsonify({"message":"This User mail is already verified","Data":email})
-        else:
-            otp = pyotp.TOTP('base32secret3232')
-            system_otp = otp.now()
-            print(system_otp)
-            time.sleep(1)
-            log.warning(f"{system_otp} OTP is created for user {user.username} with {user.emailaddress} "
-                        f"email address at {datetime.datetime.now()}")
-            user.otp = system_otp
-            db.session.commit()
-            message = Message('OTP for verification',sender=params['gmail_user'],recipients=[email['email']])
-            message.body = f"Enter this - {str(system_otp)} - OTP for your EMAIL verification ! THANK YOU :)"
+            add_books_in_order_items(user.user_id, request_data['cart_id'])
+            order_items = generate_order_items_list(user.user_id)
+            total_bill = generate_total_bill(order_items)
+            data_in_table_form = generate_order_table(order_items)
+            user_email = user.email_address
+            message = generate_bill_message(user_email,data_in_table_form,total_bill)
             mail.send(message)
-            return jsonify({"message":"OTP is send on given mail address","data":email})
-    except EmptyData:
-        return jsonify({"message": "Empty data is not allowed","Data":email})
-    except Exception as e:
-        return jsonify({"message":str(e)})
+            print(data_in_table_form)
+            return jsonify({"message": "Ordered Successful. Please check mail for order details. Thank You :)",
+                            "data": order_items})
+        except InvalidToken:
+            log.exception("Token is invalid")
+            return jsonify({"message": "Token is invalid"})
+        except Exception as e:
+            log.exception(e.__str__())
+            return jsonify({"message": "something is wrong"})
 
-@app.route('/verify/validate',methods=['POST'])
-def validate():
-    """
-    This function will take user email and verification OTP as a input
-    and then it will match user OTP and system OTP if the match is found
-    then it will return verified email address with user id token
-    :return: whether the email is verified por not if the email is verified
-            then it send user token also.
-    """
-    user_data = request.get_json()
-    try:
-        if len(user_data['otp']) != 6:
-            raise InvalidSize
-        elif not user_data['otp'].isnumeric():
-            raise InvalidNumericData
-        user = InfoModel.query.filter_by(emailaddress=user_data['email']).first()
-        if user.otp == int(user_data['otp']):
-            # user = InfoModel.query.filter_by(emailaddress=user_data['email']).first()
-            user.is_verified = 'YES'
-            user.otp = 0
-            db.session.commit()
-            encoded_jwt = jwt.encode({"uid":user.uid}, "secret", algorithm="HS256")
-            return jsonify({"message":"Email verification successfully","token":encoded_jwt})
-        return jsonify({"message":"Due to Invalid OTP , Email verification is unsuccessful"})
-    except InvalidSize:
-        return jsonify({"message":"OTP size is Invalid","Data":user_data})
-    except InvalidNumericData:
-        return jsonify({"message":"OTP should be in numeric","Data":user_data})
-    except Exception as e:
-        return jsonify({"message":str(e)})
 
-@app.route('/buybook',methods=['POST'])
-def buy_book():
-    # First decoding the token
-    auth = request.headers.get('authorization')
-    id = jwt.decode(auth, "secret", algorithms=["HS256"])
-    user = InfoModel.query.filter_by(uid=id['uid']).first()
-    # Taking book name as a input
-    user_data = request.get_json()
-    book_name = user_data['bookname']
-    # Finding user entered book is present or not in over product table
-    book_details = BookProduct.query.filter_by(title=book_name).first()
-    if book_details is None:
-        return jsonify({"message":f"No Book is present with name {book_name}"})
-    # checking cart is already created for that user.
-    cart = Orders.query.filter_by(uid=user.uid).first()
-    if cart is None:
-        # If cart is not created it will create new cart for that user
-        new_cart = Orders(user.uid,user.username)
-        db.session.add(new_cart)
-        db.session.commit()
-        # now adding that book details in users cart.
-        add_book_in_cart = Carts(cart.cart_id, book_details.title, book_details.author, book_details.baseprice)
-        db.session.add(add_book_in_cart)
-        db.session.commit()
-        return jsonify({"message":"new cart is created and your book is added in your cart"})
-    else:
-        # Checking book is already present in a cart or not
-        book_name = Carts.query.filter_by(bookname=book_name).first()
-        if book_name is None:
-            # cart is already created so new book is add in existing cart.
-            add_book_in_cart = Carts(cart.cart_id,book_details.title,book_details.author,book_details.baseprice)
-            db.session.add(add_book_in_cart)
-            db.session.commit()
-            return jsonify({"message":"cart is already created and your book is added in your cart"})
-        else:
-            # If book is already in cart then it will return msg.
-            return jsonify({"message":"book is already in cart ! Thank You :)"})
-    return user.username
 
+class UploadBooks(MethodView):
+    def post(self):
+        """
+            in this function we are adding whole csv file of books in our database
+            :return: status of csv file is uploaded or not
+        """
+        try:
+            csv_file = request.files['file']
+            df_csv = pd.read_csv(csv_file, delimiter=',')
+            for index, row in df_csv.iterrows():
+                author = row['author']
+                title = row['title']
+                baseprice = row['baseprice']
+                description = row['description']
+                quantity = row['quantity']
+                query = BookProduct(author=author, title=title, baseprice=baseprice, description=description,
+                                            quantity=quantity)
+                db.session.add(query)
+                db.session.commit()
+                return jsonify({"message": "CSV file uploaded successfully"})
+        except Exception as e:
+            log.exception(e.__str__())
+            return jsonify({"message": "Something is wrong"})
+
+
+
+class AddBookInCart(MethodView):
+    def post(self):
+        try:
+            auth = request.headers.get('authorization')
+            user = token_operation.decode_token(auth)
+            request_data = request.get_json()
+            book_details = book_coordinates.check_book_in_database(request_data['book_id'])
+            if book_details is False:
+                return jsonify({"message": f"No Book is present with book_id {request_data['book_id']}"})
+            cart = check_cart_by_user_id(user.user_id)
+            if cart is False:
+                cart = create_new_cart(user.user_id)
+            book_in_cart = check_book_in_cart(cart.cart_id,request_data['book_id'])
+            if book_in_cart is not None:
+                # update_quantity = update_book_quantity(book_in_cart,request_data['book_quantity'])
+                update_book_quantity(book_in_cart,request_data['book_quantity'])
+                return jsonify({"message": "Book Quantity is updated"})
+            # new_book_in_cart = book_coordinates.add_new_book_in_cart(cart.cart_id,book_details.product_id,request_data['book_quantity'])
+            book_coordinates.add_new_book_in_cart(cart.cart_id,book_details.product_id,request_data['book_quantity'])
+            return jsonify({"message": "Your book is added in your cart"})
+        except Exception as e:
+            log.exception(e.__str__())
+        return jsonify({"message": "something is wrong"})
+
+
+app.add_url_rule('/upload_books', view_func=UploadBooks.as_view('upload_books'))
+app.add_url_rule('/buy_book', view_func=BuyBook.as_view('buy_book'))
+app.add_url_rule('/particular_cart_details', view_func=SingleCart.as_view('single_cart'))
+app.add_url_rule('/books', view_func=Books.as_view('books'))
+app.add_url_rule('/add_book', view_func=AddBook.as_view('add_book'))
+app.add_url_rule('/add_book_in_cart', view_func=AddBookInCart.as_view('add_book_in_cart'))
+app.add_url_rule('/login', view_func=UserLogin.as_view('user_login'))
+app.add_url_rule('/registration', view_func=UserRegistration.as_view('user_registration'))
+app.add_url_rule('/verify', view_func=Verify.as_view('verify'))
+app.add_url_rule('/verify/validate', view_func=Validate.as_view('validate'))
 
 if __name__ == '__main__':
     app.run(debug=True)

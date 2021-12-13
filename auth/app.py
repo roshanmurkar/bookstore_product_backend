@@ -2,7 +2,7 @@ from flask import Flask
 from flask_mail import *
 from random import *
 import json
-
+import logging
 
 
 app = Flask(__name__)
@@ -21,4 +21,7 @@ app.config['MAIL_USE_TLS'] = False
 app.config['MAIL_USE_SSL'] = True
 
 mail = Mail(app)
+
+logging.basicConfig(filename="bookstore_otp.log", filemode="w", datefmt='%Y-%m-%d,%H:%M:%S:%f')
+log = logging.getLogger()
 # log.setLevel(logging.DEBUG)
